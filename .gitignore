@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+*.plist
+last-success*
+run.lock
+reset-backups/
+task-backups/
+.env*
