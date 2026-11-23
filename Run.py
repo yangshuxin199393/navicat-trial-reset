@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""按13天阈值尝试处理Navicat本地试用相关文件。
+"""按配置的间隔天数尝试处理Navicat本地试用相关文件，缺省13天。
 
 操作来源：https://github.com/pretend-m/navicat_for_mac_reset/blob/main/reset_navicat.sh
 将目标偏好文件和匹配隐藏文件移入本机备份目录，检测到应用进程时跳过。
@@ -18,7 +18,30 @@ from datetime import datetime
 STORE = Path.home() / 'Library/Application Support/NavicatReferenceTimer'
 PREF = Path.home() / 'Library/Preferences/com.navicat.NavicatPremium.plist'
 DATA = Path.home() / 'Library/Application Support/PremiumSoft CyberTech/Navicat CC/Navicat Premium'
-INTERVAL = 13 * 24 * 60 * 60
+DEFAULT_INTERVAL_DAYS = 13
+SECONDS_PER_DAY = 24 * 60 * 60
+
+
+def validate_interval_days(value):
+    """间隔单位为整天，允许1至365；拒绝布尔值、字符串及小数配置。"""
+    if type(value) is not int or not 1 <= value <= 365:
+        raise ValueError('interval_days必须为1至365的整数，单位为天')
+    return value
+
+
+def read_interval_days(path=None):
+    """每轮读取配置；旧安装缺少配置时沿用13天，已有配置无效时拒绝处理。"""
+    path = STORE / 'config.json' if path is None else path
+    check_path(path)
+    if not path.exists():
+        return DEFAULT_INTERVAL_DAYS
+    try:
+        config = json.loads(path.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, UnicodeError):
+        raise ValueError('config.json必须为有效的UTF-8 JSON配置') from None
+    if not isinstance(config, dict) or set(config) != {'interval_days'}:
+        raise ValueError('config.json必须是仅含interval_days字段的JSON对象')
+    return validate_interval_days(config['interval_days'])
 
 
 def log(message):
@@ -42,8 +65,9 @@ def check_path(path):
             raise RuntimeError('目标路径含符号链接，停止操作')
 
 
-def reset_files(now):
+def reset_files(now, interval_days=None):
     """备份固定目标后移走文件；任何失败均不推进下一次执行时间。"""
+    interval_days = read_interval_days() if interval_days is None else validate_interval_days(interval_days)
     for path in (PREF, DATA, STORE):
         check_path(path)
     targets = [PREF] if PREF.exists() else []
@@ -70,7 +94,7 @@ def reset_files(now):
     stamp.write_text(str(now) + '\n')
     stamp.replace(STORE / 'last-success')
     log('目标文件处理完成，试用效果待应用内确认；备份：{}；下次到期：{}'.format(
-        backup, datetime.fromtimestamp(now + INTERVAL).astimezone().isoformat(timespec='seconds')))
+        backup, datetime.fromtimestamp(now + interval_days * SECONDS_PER_DAY).astimezone().isoformat(timespec='seconds')))
     return True
 
 
@@ -81,22 +105,23 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
+        interval_days = read_interval_days()
         last = int((STORE / 'last-success').read_text().strip())
         now = int(time.time())
         if last <= 0 or last > now:
             raise RuntimeError('上次执行时间无效，停止操作')
-        due = last + INTERVAL
+        due = last + interval_days * SECONDS_PER_DAY
         if '--status' in sys.argv or '--dry-run' in sys.argv:
-            print(json.dumps({'interval_days': 13, 'due': now >= due,
+            print(json.dumps({'interval_days': interval_days, 'due': now >= due,
                               'next_due': datetime.fromtimestamp(due).astimezone().isoformat(timespec='seconds'),
                               'navicat_running': app_running(), 'mode': 'read_only'}, ensure_ascii=False))
             return 0
         if now < due:
             return 0
         if app_running():
-            log('已到13天，Navicat运行中；退出后下一次检查再处理')
+            log('已到{}天间隔，Navicat运行中；退出后下一次检查再处理'.format(interval_days))
             return 0
-        reset_files(now)
+        reset_files(now, interval_days)
         return 0
 
 

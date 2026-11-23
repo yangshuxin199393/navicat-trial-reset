@@ -2,6 +2,7 @@
 import subprocess
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,3 +40,23 @@ class InstallTests(unittest.TestCase):
             install.main()
         self.assertFalse(self.agent.exists())
         self.assertEqual((self.store / 'last-success').read_text(), '123')
+
+    def test_custom_interval_survives_reinstall_and_can_be_changed(self):
+        with patch('sys.argv', ['install.py', '--interval-days', '7']):
+            install.main()
+        stamp = (self.store / 'last-success').read_text()
+        with patch('sys.argv', ['install.py']):
+            install.main()
+        self.assertEqual(json.loads((self.store / 'config.json').read_text())['interval_days'], 7)
+        with patch('sys.argv', ['install.py', '--interval-days', '20']):
+            install.main()
+        self.assertEqual(json.loads((self.store / 'config.json').read_text())['interval_days'], 20)
+        self.assertEqual((self.store / 'last-success').read_text(), stamp)
+
+    def test_invalid_interval_is_rejected_before_launchctl(self):
+        for value in ('0', '-1', '366', '1.5', 'abc'):
+            with self.subTest(value=value), patch('sys.argv', ['install.py', '--interval-days', value]):
+                with self.assertRaises(SystemExit):
+                    install.main()
+        self.calls.assert_not_called()
+        self.assertFalse(self.store.exists())

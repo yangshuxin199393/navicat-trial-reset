@@ -2,6 +2,8 @@
 import tempfile
 import time
 import unittest
+import io
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +22,7 @@ class TimerTests(unittest.TestCase):
         self.data.mkdir()
         self.now = int(time.time())
         self.stamp = self.store / 'last-success'
-        self.stamp.write_text(str(self.now - timer.INTERVAL - 1))
+        self.stamp.write_text(str(self.now - timer.DEFAULT_INTERVAL_DAYS * timer.SECONDS_PER_DAY - 1))
         self.pref.write_text('synthetic preferences')
         self.marker = self.data / ('.' + 'A' * 32)
         self.marker.write_text('synthetic marker')
@@ -83,6 +85,49 @@ class TimerTests(unittest.TestCase):
             self.assertEqual(timer.main(), 0)
         self.assertTrue(self.pref.exists())
         self.assertTrue(self.marker.exists())
+
+    def test_configured_interval_controls_due_time_and_status(self):
+        (self.store / 'config.json').write_text('{"interval_days": 30}')
+        out = io.StringIO()
+        with patch.object(timer.sys, 'argv', ['Run.py', '--status']), \
+                patch.object(timer, 'app_running', return_value=False), patch('sys.stdout', out):
+            self.assertEqual(timer.main(), 0)
+        status = json.loads(out.getvalue())
+        self.assertEqual(status['interval_days'], 30)
+        self.assertFalse(status['due'])
+        with patch.object(timer, 'app_running', side_effect=AssertionError('not due')):
+            self.assertEqual(timer.main(), 0)
+        self.assertTrue(self.pref.exists())
+
+    def test_shorter_interval_is_used_for_processing_and_next_due(self):
+        (self.store / 'config.json').write_text('{"interval_days": 2}')
+        out = io.StringIO()
+        with patch.object(timer, 'app_running', return_value=False), patch('sys.stdout', out):
+            self.assertEqual(timer.main(), 0)
+        next_due = timer.datetime.fromtimestamp(int(self.stamp.read_text()) + 2 * timer.SECONDS_PER_DAY)
+        self.assertIn(next_due.astimezone().isoformat(timespec='seconds'), out.getvalue())
+        self.assertFalse(self.pref.exists())
+
+    def test_invalid_configuration_stops_before_file_processing(self):
+        invalid = ['invalid json', '[]', '{}', '{"interval_days":13,"typo":1}']
+        invalid += [json.dumps({'interval_days': value}) for value in (0, -1, 366, True, None, 1.5, '13')]
+        before = self.stamp.read_text()
+        for config in invalid:
+            with self.subTest(config=config):
+                (self.store / 'config.json').write_text(config)
+                with patch.object(timer, 'app_running', side_effect=AssertionError('invalid config')):
+                    with self.assertRaises(ValueError):
+                        timer.main()
+                self.assertTrue(self.pref.exists())
+                self.assertTrue(self.marker.exists())
+                self.assertEqual(self.stamp.read_text(), before)
+
+    def test_configuration_bounds_and_legacy_default(self):
+        self.assertEqual(timer.read_interval_days(), 13)
+        for days in (1, 365):
+            with self.subTest(days=days):
+                (self.store / 'config.json').write_text(json.dumps({'interval_days': days}))
+                self.assertEqual(timer.read_interval_days(), days)
 
 
 if __name__ == '__main__':
